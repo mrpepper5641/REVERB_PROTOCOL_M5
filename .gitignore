@@ -104,3 +104,17 @@ InitTestScene*.unity*
 
 # Auto-generated cache in Assets folder
 /[Aa]ssets/[Ss]ceneDependencyCache*
+
+# Unity auto-generated recovery files
+/[Aa]ssets/_[Rr]ecovery/
+/[Aa]ssets/_[Rr]ecovery.meta
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor-specific files
+*.swp
+*.swo
+*~
