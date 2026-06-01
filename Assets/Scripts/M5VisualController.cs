@@ -1,16 +1,36 @@
 using UnityEngine;
+using UnityEngine.UI;
 
+/// <summary>
+/// フロー:
+///   Plane0(LOGIN) → BtnB でハック開始 → ハック成功で自動 Plane1
+///   Plane1(logDisplay) → BtnC で Plane2
+///   Plane2(downloadWindow) → BtnB でダウンロード演出 → 完了画面
+/// </summary>
 public class M5VisualController : MonoBehaviour
 {
+    // -------------------------------------------------------
     [Header("References")]
     [SerializeField] private M5Reader m5Reader;
     [SerializeField] private Renderer targetRenderer;
 
-    [Header("Extrude Mapping (Pitch)")]
-    [SerializeField] private float maxRollDegrees = 60f;
-    [SerializeField] private float maxExtrude = 1.0f;
+    [Header("Planes (0=LOGIN / 1=logDisplay / 2=downloadWindow)")]
+    [SerializeField] private GameObject[] planes;
+    [SerializeField] private Vector3[] planeRotationOffsets;
 
-    [Header("Rotation Mapping (Roll)")]
+    [Header("Hack Minigame")]
+    [SerializeField] private HackMinigame hackMinigame;
+
+    [Header("Download Complete UI")]
+    [Tooltip("ダウンロード完了時に表示する Canvas/Panel")]
+    [SerializeField] private GameObject downloadCompleteUI;
+    [Tooltip("ダウンロード演出の秒数")]
+    [SerializeField] private float downloadDuration = 4f;
+
+    // -------------------------------------------------------
+    [Header("Extrude / Rotation")]
+    [SerializeField] private float maxRollDegrees = 60f;
+    [SerializeField] private float maxExtrude     = 1.0f;
     [SerializeField] private float pitchRotationMultiplier = -1.0f;
     [SerializeField] private float maxTiltDegrees = 60f;
 
@@ -19,44 +39,15 @@ public class M5VisualController : MonoBehaviour
     [SerializeField] private float smoothing = 0.15f;
 
     [Header("Disturbance (shake)")]
-    [Tooltip("この値を超えた加速度でゴーストが出る。小さいほど敏感")]
-    [SerializeField] private float disturbanceThreshold = 0.5f;
-    [Tooltip("振ったときの最大ゴーストオフセット")]
-    [SerializeField] private float maxGhostOffset = 0.12f;
-    [Tooltip("振り終わった後の減衰時間（秒）")]
-    [SerializeField] private float disturbanceDecayTime = 0.4f;
+    [SerializeField] private float disturbanceThreshold  = 0.5f;
+    [SerializeField] private float maxGhostOffset        = 0.04f;
+    [SerializeField] private float disturbanceDecayTime  = 0.4f;
 
-    // -------------------------------------------------------
-    // Button A: Plane Swap
-    // Inspector に複数の Plane GameObject をドラッグして登録する。
-    // 将来的にはフォトショ等で作成したテクスチャを貼った Quad/Plane を追加する想定。
-    // -------------------------------------------------------
-    [Header("Button A: Plane Swap")]
-    [Tooltip("Aボタンでサイクルする Plane を順番に登録する")]
-    [SerializeField] private GameObject[] planes;
-    [Tooltip("各Planeのメッシュ向き補正（°）。Planeとは向きが違うメッシュに使う。例：Quadなら(90,0,0)など")]
-    [SerializeField] private Vector3[] planeRotationOffsets;
-
-    [Header("Button B: Hack Trigger (Plane 4 only)")]
-    [SerializeField] private int hackPlaneIndex = 4;
-    [SerializeField] private HackMinigame hackMinigame;
-
-    [Header("Button B: IMU Freeze (hold)")]
-    [SerializeField] private bool imuFrozen = false;
-
-    // -------------------------------------------------------
-    // Touch 1: Plane Glow
-    // タッチ座標とPlane UV のズレは FlipX / FlipY で調整する。
-    // M5 の向きと Unity のカメラ方向によって変わるため、
-    // 実機で確認しながら切り替える。
-    // -------------------------------------------------------
-    [Header("Touch 1: Plane Glow")]
+    [Header("Touch Glow")]
     [SerializeField] private float touchGlow    = 1.5f;
     [SerializeField] private float touchFalloff = 80f;
-    [Tooltip("タッチX軸が左右逆の場合にチェック")]
-    [SerializeField] private bool touchFlipX = false;
-    [Tooltip("タッチY軸が上下逆の場合にチェック（デフォルトON）")]
-    [SerializeField] private bool touchFlipY = true;
+    [SerializeField] private bool  touchFlipX   = false;
+    [SerializeField] private bool  touchFlipY   = true;
 
     [Header("Glitch (Auto)")]
     [SerializeField] private float glitchIntervalMin = 10f;
@@ -64,12 +55,12 @@ public class M5VisualController : MonoBehaviour
     [SerializeField] private float glitchDuration    = 0.5f;
     [SerializeField] private float glitchIntensity   = 0.35f;
 
-    [Header("Touch 3: Scanline")]
+    [Header("Scanline")]
     [SerializeField] private PostEffect postEffect;
     [SerializeField] private float scanlineMin      = 150f;
     [SerializeField] private float scanlineMax      = 750f;
     [SerializeField] private float scanlineDefault  = 450f;
-    [Range(0f, 1f)]
+    [Range(0f,1f)]
     [SerializeField] private float scanlineSmoothing = 0.08f;
 
     [Header("Live (read-only)")]
@@ -77,29 +68,44 @@ public class M5VisualController : MonoBehaviour
     [SerializeField] private float currentTilt;
     [SerializeField] private float currentDisturbance;
     [SerializeField] private float currentScanline = 450f;
+    [SerializeField] private int   currentPlaneIndex;
 
-    // --- internal state ---
+    // -------------------------------------------------------
+    // フローステート
+    // -------------------------------------------------------
+    private enum FlowState
+    {
+        Login,          // Plane0: BtnB でハック開始
+        LogDisplay,     // Plane1: 自動表示、BtnC で次へ
+        Downloading,    // Plane2: ダウンロード演出中
+        DownloadDone    // 完了画面
+    }
+    private FlowState flowState = FlowState.Login;
+    private float downloadTimer = 0f;
+
+    // -------------------------------------------------------
+    // 内部変数
+    // -------------------------------------------------------
     private Material   runtimeMaterial;
-    private Quaternion initialRotation;         // index 0 の Plane から取得した基準向き
-    private Quaternion planeBaseRotation;       // initialRotation × 現在 Plane のオフセット
-    private Transform  activePlaneTransform;    // 現在アクティブな Plane の Transform
+    private Quaternion initialRotation;
+    private Quaternion planeBaseRotation;
+    private Transform  activePlaneTransform;
     private int        planeIndex = 0;
 
-    private static readonly int ExtrudeAmountID = Shader.PropertyToID("_ExtrudeAmount");
-    private static readonly int GhostOffsetID   = Shader.PropertyToID("_GhostOffset");
-    private static readonly int TouchPointID      = Shader.PropertyToID("_TouchPoint");
-    private static readonly int TouchActiveID     = Shader.PropertyToID("_TouchActive");
-    private static readonly int TouchGlowID       = Shader.PropertyToID("_TouchGlow");
-    private static readonly int TouchFalloffID    = Shader.PropertyToID("_TouchFalloff");
-    private static readonly int GlitchIntensityID   = Shader.PropertyToID("_GlitchIntensity");
-    private static readonly int ShowHackButtonID    = Shader.PropertyToID("_ShowHackButton");
-    private static readonly int HackButtonPulseID   = Shader.PropertyToID("_HackButtonPulse");
+    private static readonly int ExtrudeAmountID    = Shader.PropertyToID("_ExtrudeAmount");
+    private static readonly int GhostOffsetID      = Shader.PropertyToID("_GhostOffset");
+    private static readonly int TouchPointID       = Shader.PropertyToID("_TouchPoint");
+    private static readonly int TouchActiveID      = Shader.PropertyToID("_TouchActive");
+    private static readonly int TouchGlowID        = Shader.PropertyToID("_TouchGlow");
+    private static readonly int TouchFalloffID     = Shader.PropertyToID("_TouchFalloff");
+    private static readonly int GlitchIntensityID  = Shader.PropertyToID("_GlitchIntensity");
+    private static readonly int ShowHackButtonID   = Shader.PropertyToID("_ShowHackButton");
+    private static readonly int HackButtonPulseID  = Shader.PropertyToID("_HackButtonPulse");
 
-    private bool  prevBtnA = false;
-    private bool  prevBtnB = false;
-    private bool  prevBtnC = false;
+    private bool prevBtnA = false;
+    private bool prevBtnB = false;
+    private bool prevBtnC = false;
 
-    // --- Glitch state ---
     private float glitchCooldown      = 0f;
     private float glitchTimeRemaining = 0f;
 
@@ -107,68 +113,135 @@ public class M5VisualController : MonoBehaviour
 
     void Start()
     {
-        // planes 配列が設定されていれば index 0 のみ有効化
+        if (M5Reader.Instance != null) m5Reader = M5Reader.Instance;
+
         if (planes != null && planes.Length > 0)
-        {
             for (int i = 0; i < planes.Length; i++)
                 if (planes[i] != null) planes[i].SetActive(i == 0);
-        }
 
-        // Target Renderer 未設定なら planes[0] から自動取得
-        // （PlaneManager など Renderer を持たない GO にスクリプトを置いた場合の対応）
         if (targetRenderer == null && planes != null && planes.Length > 0 && planes[0] != null)
             targetRenderer = planes[0].GetComponent<Renderer>();
-
-        // それでも見つからない場合は自分自身を探す（後方互換）
         if (targetRenderer == null)
             targetRenderer = GetComponent<Renderer>();
 
-        if (targetRenderer == null)
-        {
-            Debug.LogError("[M5VisualController] Renderer が見つかりません。Planes 配列を設定してください。");
-            return;
-        }
+        if (targetRenderer == null) { Debug.LogError("[M5VC] Renderer not found."); return; }
 
         runtimeMaterial      = targetRenderer.material;
         activePlaneTransform = targetRenderer.transform;
         initialRotation      = activePlaneTransform.rotation;
         planeBaseRotation    = initialRotation * GetPlaneOffset(0);
+        glitchCooldown       = Random.Range(glitchIntervalMin, glitchIntervalMax);
 
-        // グリッチの初回発生タイミングをランダムに設定
-        glitchCooldown = Random.Range(glitchIntervalMin, glitchIntervalMax);
+        if (downloadCompleteUI != null) downloadCompleteUI.SetActive(false);
     }
 
-    // index番目のPlaneに設定された補正回転を返す
-    private Quaternion GetPlaneOffset(int index)
+    void Update()
     {
-        if (planeRotationOffsets == null || index >= planeRotationOffsets.Length)
-            return Quaternion.identity;
-        return Quaternion.Euler(planeRotationOffsets[index]);
+        if (m5Reader == null || runtimeMaterial == null) return;
+
+        bool currBtnA = m5Reader.ButtonA;
+        bool currBtnB = m5Reader.ButtonB;
+        bool currBtnC = m5Reader.ButtonC;
+
+        HandleFlow(currBtnA, currBtnB, currBtnC);
+        HandleTouch();
+        HandleIMU();
+        UpdateGlitch();
+
+        prevBtnA = currBtnA;
+        prevBtnB = currBtnB;
+        prevBtnC = currBtnC;
     }
 
-    // Plane を切り替える。direction = +1 で次、-1 で前
-    private void CyclePlane(int direction = 1)
+    // -------------------------------------------------------
+    // フロー制御
+    // -------------------------------------------------------
+    private void HandleFlow(bool currBtnA, bool currBtnB, bool currBtnC)
     {
-        if (planes == null || planes.Length == 0) return;
+        switch (flowState)
+        {
+            // ── Plane0: LOGIN ─────────────────────────────────
+            case FlowState.Login:
+                // ハックボタンインジケーター（円リング）は非表示
+                bool hackActive = hackMinigame != null && hackMinigame.IsActive;
+                if (runtimeMaterial != null)
+                {
+                    runtimeMaterial.SetFloat(ShowHackButtonID, 0f);
+                }
 
-        // 現在の Plane をリセット・非表示
+                // BtnB でハック開始
+                if (currBtnB && !prevBtnB && !hackActive)
+                {
+                    hackMinigame?.StartHack();
+                    TriggerGlitch(0.5f);
+                }
+
+                // ハック成功 → Plane1へ自動遷移
+                if (hackMinigame != null &&
+                    hackMinigame.CurrentState == HackMinigame.State.Success)
+                {
+                    GoToPlane(1);
+                    flowState = FlowState.LogDisplay;
+                    TriggerGlitch(0.8f);
+                }
+                break;
+
+            // ── Plane1: logDisplay ────────────────────────────
+            case FlowState.LogDisplay:
+                if (runtimeMaterial != null)
+                    runtimeMaterial.SetFloat(ShowHackButtonID, 0f);
+
+                // BtnC で Plane2へ
+                if (currBtnC && !prevBtnC)
+                {
+                    GoToPlane(2);
+                    flowState = FlowState.Downloading;
+                    downloadTimer = 0f;
+                    TriggerGlitch(0.3f);
+                }
+                break;
+
+            // ── Plane2: ダウンロード演出 ───────────────────────
+            case FlowState.Downloading:
+                if (runtimeMaterial != null)
+                    runtimeMaterial.SetFloat(ShowHackButtonID, 0f);
+
+                downloadTimer += Time.deltaTime;
+                if (downloadTimer >= downloadDuration)
+                {
+                    flowState = FlowState.DownloadDone;
+                    if (downloadCompleteUI != null) downloadCompleteUI.SetActive(true);
+                    TriggerGlitch(1.0f);
+                }
+                break;
+
+            case FlowState.DownloadDone:
+                // 完了画面を表示したまま終了
+                break;
+        }
+    }
+
+    // -------------------------------------------------------
+    private void GoToPlane(int index)
+    {
+        if (planes == null || index >= planes.Length) return;
+
         var current = planes[planeIndex];
         if (current != null)
         {
-            current.transform.rotation = initialRotation; // ロール回転を戻す
+            current.transform.rotation = initialRotation;
             current.SetActive(false);
         }
 
-        planeIndex = (planeIndex + direction + planes.Length) % planes.Length;
+        planeIndex = index;
+        currentPlaneIndex = index;
 
-        // 次の Plane を表示・参照更新
         var next = planes[planeIndex];
         if (next == null) return;
-
         next.SetActive(true);
-        // initialRotation（index 0 基準）× 各Plane固有のオフセット を適用
-        planeBaseRotation           = initialRotation * GetPlaneOffset(planeIndex);
-        next.transform.rotation     = planeBaseRotation;
+
+        planeBaseRotation        = initialRotation * GetPlaneOffset(planeIndex);
+        next.transform.rotation  = planeBaseRotation;
 
         var r = next.GetComponent<Renderer>();
         if (r != null)
@@ -179,59 +252,23 @@ public class M5VisualController : MonoBehaviour
         }
     }
 
-    void Update()
+    private Quaternion GetPlaneOffset(int index)
     {
-        if (m5Reader == null || runtimeMaterial == null) return;
+        if (planeRotationOffsets == null || index >= planeRotationOffsets.Length)
+            return Quaternion.identity;
+        return Quaternion.Euler(planeRotationOffsets[index]);
+    }
 
-        // ======================================================
-        // BUTTON HANDLING
-        // ======================================================
-        bool currBtnA = m5Reader.ButtonA;
-        bool currBtnB = m5Reader.ButtonB;
-        bool currBtnC = m5Reader.ButtonC;
-
-        // A: 立ち上がりエッジ → 前の Plane へ
-        if (currBtnA && !prevBtnA)
-        {
-            CyclePlane(-1);
-            TriggerGlitch(0.3f);
-        }
-
-        // B: Plane 4 のみ hack 起動、それ以外は IMU フリーズ
-        if (currBtnB && !prevBtnB)
-        {
-            if (planeIndex == hackPlaneIndex && hackMinigame != null)
-            {
-                hackMinigame.StartHack();
-                TriggerGlitch(0.5f);
-            }
-            else
-            {
-                TriggerGlitch(0.3f);
-            }
-        }
-        imuFrozen = currBtnB && (planeIndex != hackPlaneIndex);
-
-        // C: 立ち上がりエッジ → 次の Plane へ
-        if (currBtnC && !prevBtnC)
-        {
-            CyclePlane(+1);
-            TriggerGlitch(0.3f);
-        }
-
-        prevBtnA = currBtnA;
-        prevBtnB = currBtnB;
-        prevBtnC = currBtnC;
-
-        // ======================================================
-        // TOUCH HANDLING  ※ imuFrozen 中も動作する
-        // ======================================================
+    // -------------------------------------------------------
+    // タッチ
+    // -------------------------------------------------------
+    private void HandleTouch()
+    {
         Vector2 touch       = m5Reader.Touch;
         bool    touchActive = touch.x >= 0f;
 
         if (touchActive)
         {
-            // FlipX / FlipY で実機のズレを補正する
             float tu = touchFlipX ? 1f - touch.x : touch.x;
             float tv = touchFlipY ? 1f - touch.y : touch.y;
             runtimeMaterial.SetVector(TouchPointID, new Vector4(tu, tv, 0f, 0f));
@@ -244,7 +281,6 @@ public class M5VisualController : MonoBehaviour
         runtimeMaterial.SetFloat(TouchGlowID,    touchGlow);
         runtimeMaterial.SetFloat(TouchFalloffID, touchFalloff);
 
-        // Touch 3: タッチY → 走査線の密度
         if (postEffect != null)
         {
             float targetScanline = touchActive
@@ -253,59 +289,40 @@ public class M5VisualController : MonoBehaviour
             currentScanline          = Mathf.Lerp(currentScanline, targetScanline, 1f - scanlineSmoothing);
             postEffect.scanlineCount = currentScanline;
         }
+    }
 
-        // ======================================================
-        // HACK BUTTON INDICATOR (Plane 4 のみ表示)
-        // ======================================================
-        bool onHackPlane = (planeIndex == hackPlaneIndex);
-        bool hackActive  = hackMinigame != null && hackMinigame.IsActive;
-        if (runtimeMaterial != null)
-        {
-            runtimeMaterial.SetFloat(ShowHackButtonID,
-                onHackPlane && !hackActive ? 1f : 0f);
-            runtimeMaterial.SetFloat(HackButtonPulseID,
-                Mathf.Abs(Mathf.Sin(Time.time * 2.5f)));
-        }
-
-        // ======================================================
-        // IMU MAPPING  ※ B ホールド中 or hack 進行中はスキップ
-        // ======================================================
+    // -------------------------------------------------------
+    // IMU
+    // -------------------------------------------------------
+    private void HandleIMU()
+    {
+        bool hackActive = hackMinigame != null && hackMinigame.IsActive;
+        bool imuFrozen  = m5Reader.ButtonB && (flowState != FlowState.Login);
         if (imuFrozen || hackActive) return;
 
-        // ---------- extrude (Pitch) ----------
-        float extrudeInput  = m5Reader.Pitch;
-        float extrudeNorm   = Mathf.Clamp01(Mathf.Abs(extrudeInput) / maxRollDegrees);
-        float targetExtrude = extrudeNorm * maxExtrude;
-        currentExtrude = Mathf.Lerp(currentExtrude, targetExtrude, 1f - smoothing);
+        // Extrude (Pitch)
+        float extrudeNorm   = Mathf.Clamp01(Mathf.Abs(m5Reader.Pitch) / maxRollDegrees);
+        currentExtrude      = Mathf.Lerp(currentExtrude, extrudeNorm * maxExtrude, 1f - smoothing);
         runtimeMaterial.SetFloat(ExtrudeAmountID, currentExtrude);
 
-        // ---------- rotation (Roll) ----------
-        float rotationInput = m5Reader.Roll;
-        float clampedTilt   = Mathf.Clamp(rotationInput * pitchRotationMultiplier,
-                                           -maxTiltDegrees, maxTiltDegrees);
+        // Rotation (Roll)
+        float clampedTilt = Mathf.Clamp(m5Reader.Roll * pitchRotationMultiplier,
+                                        -maxTiltDegrees, maxTiltDegrees);
         currentTilt = Mathf.Lerp(currentTilt, clampedTilt, 1f - smoothing);
         if (activePlaneTransform != null)
             activePlaneTransform.rotation = planeBaseRotation * Quaternion.Euler(currentTilt, 0f, 0f);
 
-        // ---------- disturbance (shake) ----------
+        // Disturbance (Shake)
         float accelMag       = m5Reader.Accel.magnitude;
         float rawDisturbance = Mathf.Max(0f, Mathf.Abs(accelMag - 1.0f) - disturbanceThreshold);
-
         if (rawDisturbance > currentDisturbance)
             currentDisturbance = rawDisturbance;
         else
         {
-            float decay    = 1f / Mathf.Max(0.01f, disturbanceDecayTime);
+            float decay = 1f / Mathf.Max(0.01f, disturbanceDecayTime);
             currentDisturbance = Mathf.Max(0f, currentDisturbance - decay * Time.deltaTime);
         }
 
-        // ======================================================
-        // GLITCH UPDATE (ボタン・自動グリッチ)
-        // ======================================================
-        UpdateGlitch();
-
-        // 振りグリッチ: ボタン/自動グリッチが発動していない間のみ
-        // disturbance が GlitchIntensity・GhostOffset・PostEffect を全部駆動する
         if (glitchTimeRemaining <= 0f)
         {
             float shakeI = Mathf.Clamp01(currentDisturbance);
@@ -315,11 +332,14 @@ public class M5VisualController : MonoBehaviour
             {
                 postEffect.aberrationBoost = shakeI * glitchIntensity * 0.08f;
                 postEffect.grainBoost      = shakeI * glitchIntensity * 0.25f;
+                postEffect.ghostOffset     = shakeI * maxGhostOffset;
             }
         }
     }
 
-    // グリッチをトリガーする（duration < 0 のときは glitchDuration を使う）
+    // -------------------------------------------------------
+    // グリッチ
+    // -------------------------------------------------------
     private void TriggerGlitch(float duration = -1f)
     {
         glitchTimeRemaining = duration > 0f ? duration : glitchDuration;
@@ -331,14 +351,9 @@ public class M5VisualController : MonoBehaviour
 
         if (glitchTimeRemaining > 0f)
         {
-            // グリッチ進行中
             glitchTimeRemaining -= Time.deltaTime;
-            float t = Mathf.Clamp01(glitchTimeRemaining / glitchDuration);
-
-            // 最初の70%は全力、残り30%でフェードアウト
-            float intensity = t > 0.3f
-                ? glitchIntensity
-                : (t / 0.3f) * glitchIntensity;
+            float t         = Mathf.Clamp01(glitchTimeRemaining / glitchDuration);
+            float intensity = t > 0.3f ? glitchIntensity : (t / 0.3f) * glitchIntensity;
 
             runtimeMaterial.SetFloat(GlitchIntensityID, intensity);
             runtimeMaterial.SetFloat(GhostOffsetID,    intensity * maxGhostOffset);
@@ -346,19 +361,18 @@ public class M5VisualController : MonoBehaviour
             {
                 postEffect.aberrationBoost = intensity * 0.08f;
                 postEffect.grainBoost      = intensity * 0.25f;
+                postEffect.ghostOffset     = intensity * maxGhostOffset;
             }
 
-            // 終了処理
             if (glitchTimeRemaining <= 0f)
             {
                 runtimeMaterial.SetFloat(GlitchIntensityID, 0f);
                 runtimeMaterial.SetFloat(GhostOffsetID,     0f);
-                if (postEffect != null) { postEffect.aberrationBoost = 0f; postEffect.grainBoost = 0f; }
+                if (postEffect != null) { postEffect.aberrationBoost = 0f; postEffect.grainBoost = 0f; postEffect.ghostOffset = 0f; }
             }
         }
         else
         {
-            // 次のグリッチまでカウントダウン
             glitchCooldown -= Time.deltaTime;
             if (glitchCooldown <= 0f)
             {

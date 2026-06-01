@@ -7,6 +7,20 @@ using UnityEngine;
 
 public class M5Reader : MonoBehaviour
 {
+    // ── Singleton ──────────────────────────────────────────────
+    public static M5Reader Instance { get; private set; }
+
+    void Awake()
+    {
+        if (Instance != null && Instance != this)
+        {
+            Destroy(gameObject);
+            return;
+        }
+        Instance = this;
+        DontDestroyOnLoad(gameObject);
+    }
+
     [Header("Serial Settings")]
     [SerializeField] private int baudRate = 115200;
     [SerializeField] private string handshakeString = "M5_HANDSHAKE_v1";

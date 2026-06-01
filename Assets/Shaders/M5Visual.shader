@@ -6,6 +6,9 @@ Shader "Unlit/M5Visual"
         _LineColor ("Line Color", Color) = (0.545, 0.592, 0.314, 1.0)
         _ExtrudeAmount ("Extrude Amount", Range(0, 2)) = 0.3
         _GhostOffset ("Ghost Offset", Range(0, 0.5)) = 0.0
+        // --- Texture ---
+        _MainTex  ("Texture", 2D) = "white" {}
+        _TexBlend ("Texture Blend", Range(0, 1)) = 0.0
         // --- Button A: render mode ---
         _RenderMode ("Render Mode", Float) = 0
         _WireWidth  ("Wire Width",  Range(0.001, 0.15)) = 0.03
@@ -50,6 +53,8 @@ Shader "Unlit/M5Visual"
         float2 uv    : TEXCOORD2;
     };
 
+    sampler2D _MainTex;
+    float     _TexBlend;
     fixed4 _BaseColor;
     fixed4 _LineColor;
     float  _ExtrudeAmount;
@@ -76,10 +81,11 @@ Shader "Unlit/M5Visual"
 
     // ── ジオメトリ補助: 三角形1枚を変形して出力 ──────────────────
     // triangle修飾子はエントリポイントのみに付けるため、ここでは外す
+    // applyGlitch=1.0: メインパスのみジオメトリ歪みを適用、ゴーストパスは0.0
     void emitTriangle(v2g input[3],
                       inout TriangleStream<g2f> stream,
                       float2 xyShift, float extrudeFactor, float layerId,
-                      float animHash, float bandPhase)
+                      float animHash, float bandPhase, float applyGlitch)
     {
         float3 barys[3] = {
             float3(1, 0, 0),
@@ -92,27 +98,29 @@ Shader "Unlit/M5Visual"
             g2f o;
             float4 vpos = input[i].vertex;
             vpos.xyz += input[i].normal * _ExtrudeAmount * extrudeFactor;
-            vpos.x   += xyShift.x;
-            vpos.y   += xyShift.y;
 
-            if (_GlitchIntensity > 0.001)
+            // ジオメトリ歪みはメインパスのみ（ゴーストに適用すると斜め線・縁が崩れる）
+            if (applyGlitch > 0.5 && _GlitchIntensity > 0.001)
             {
-                // ① VHSスキャンバンド（レイヤーごとに位相が違うのでRGBが別々の帯でずれる）
+                // ① VHSスキャンバンド
                 float band      = floor(input[i].uv.y * 8.0 + _Time.y * 0.5 + bandPhase);
                 float bandNoise = frac(sin(band * 127.1 + _Time.y * 6.3 + bandPhase * 17.3)
                                       * 43758.5453);
-                vpos.x += (bandNoise - 0.5) * _GlitchIntensity * 3.0;
+                vpos.x += (bandNoise - 0.5) * _GlitchIntensity * 0.8;
 
                 // ② 三角形単位のブロックノイズ
-                if (animHash > 0.75)
+                if (animHash > 0.85)
                     vpos.x += (frac(animHash * 17.3 + _Time.y * 0.8) - 0.5)
-                              * _GlitchIntensity * 4.5;
-                if (animHash < 0.12)
+                              * _GlitchIntensity * 1.5;
+                if (animHash < 0.08)
                     vpos.y += (frac(animHash * 31.7 + _Time.y * 1.2) - 0.5)
-                              * _GlitchIntensity * 2.5;
+                              * _GlitchIntensity * 1.0;
             }
 
             o.pos   = UnityObjectToClipPos(vpos);
+            // ゴーストのクリップ空間シフト（xyShift != 0 のときのみ）
+            o.pos.x += xyShift.x * o.pos.w;
+            o.pos.y += xyShift.y * o.pos.w;
             o.layer = layerId;
             o.bary  = barys[i];
             o.uv    = input[i].uv;
@@ -136,42 +144,44 @@ Shader "Unlit/M5Visual"
             if (peak < 1.0 - _PointSize) discard;
         }
 
-        // ── レイヤー着色 ─────────────────────────────────────
         fixed4 col;
-        fixed3 L = _LineColor.rgb;
-        if      (i.layer < 1.5) col = _LineColor;
-        else if (i.layer < 2.5) col = fixed4(L.r*0.90, L.g*0.06, L.b*0.06, 1.0); // 左上  R
-        else if (i.layer < 3.5) col = fixed4(L.r*0.06, L.g*0.06, L.b*0.92, 1.0); // 右下  B
-        else if (i.layer < 4.5) col = fixed4(L.r*0.06, L.g*0.70, L.b*0.70, 1.0); // 左下  C(cyan)
-        else if (i.layer < 5.5) col = fixed4(L.r*0.65, L.g*0.06, L.b*0.65, 1.0); // 右上  M(magenta)
-        else                    col = fixed4(L.r*0.25, L.g*0.25, L.b*0.25, 1.0);  // 右遠  dim
 
-        // ── ゴーストの不透明度を GhostOffset に連動（加算パス用）──
-        // GhostOffset = 0 のとき ghostAlpha = 0 → 黒 → 加算しても何も変わらない
-        // GhostOffset が大きくなるほど色収差が強まる
-        if (i.layer > 1.5)
+        if (i.layer < 1.5)
         {
-            float ghostAlpha = saturate(_GhostOffset * 10.0);
-            col.rgb *= ghostAlpha;
+            // ── メインレイヤー ────────────────────────────────
+            // Unity Plane UV は上下・左右逆なので反転
+            float2 baseUV = float2(1.0 - i.uv.x, 1.0 - i.uv.y);
+
+            // 色収差: _GhostOffset に応じてR/B チャンネルを左右にずらす
+            // → メインパスのフラグメントで完結するので Plane 外には絶対はみ出ない
+            float g = _GhostOffset * 0.05; // 微細な色収差 (0.12*0.05=0.006 UV)
+            float r = tex2D(_MainTex, clamp(baseUV + float2(-g, 0.0), 0.001, 0.999)).r;
+            float greenV = tex2D(_MainTex, baseUV).g;
+            float b = tex2D(_MainTex, clamp(baseUV + float2( g, 0.0), 0.001, 0.999)).b;
+            float a = tex2D(_MainTex, baseUV).a;
+            fixed4 texCol = fixed4(r, greenV, b, a);
+
+            col.rgb = lerp(_LineColor.rgb, texCol.rgb, _TexBlend);
+            col.a   = lerp(1.0,           texCol.a,   _TexBlend);
+
+            // タッチグロー
+            if (_TouchActive > 0.5)
+            {
+                float2 diff = i.uv - _TouchPoint.xy;
+                float  dist = dot(diff, diff);
+                float  glow = exp(-dist * _TouchFalloff) * _TouchGlow;
+                col.rgb += _LineColor.rgb * glow;
+            }
         }
-
-        // ── タッチグロー（メインレイヤーのみ）────────────────
-        if (_TouchActive > 0.5 && i.layer < 1.5)
+        else
         {
-            float2 diff = i.uv - _TouchPoint.xy;
-            float  dist = dot(diff, diff);
-            float  glow = exp(-dist * _TouchFalloff) * _TouchGlow;
-            col.rgb += _LineColor.rgb * glow;
-        }
-
-        // ── ハックボタン インジケーター（メインレイヤーのみ）─────
-        if (_ShowHackButton > 0.5 && i.layer < 1.5)
-        {
-            float2 d          = i.uv - float2(0.5, 0.5);
-            float  r          = sqrt(dot(d, d));
-            float  ring       = exp(-pow((r - 0.18) / 0.012, 2.0));
-            float  brightness = 0.6 + 0.4 * _HackButtonPulse;
-            col.rgb += fixed3(0.3, 0.9, 0.4) * ring * brightness;
+            // ── ゴーストレイヤー: GhostOffset=0のとき非表示、振ったとき出現 ──
+            float go = saturate(_GhostOffset * 25.0);
+            if      (i.layer < 2.5) col = fixed4(0.06, 0.0,  0.0,  0.0) * go; // R
+            else if (i.layer < 3.5) col = fixed4(0.0,  0.0,  0.06, 0.0) * go; // B
+            else if (i.layer < 4.5) col = fixed4(0.0,  0.05, 0.05, 0.0) * go; // Cyan
+            else if (i.layer < 5.5) col = fixed4(0.05, 0.0,  0.05, 0.0) * go; // Magenta
+            else                    col = fixed4(0.02, 0.0,  0.04, 0.0) * go; // dim purple
         }
 
         return col;
@@ -180,16 +190,17 @@ Shader "Unlit/M5Visual"
 
     SubShader
     {
-        Tags { "RenderType"="Opaque" "Queue"="Geometry" }
+        Tags { "RenderType"="Transparent" "Queue"="Transparent" }
         LOD 100
 
         // ============================================================
-        // Pass 0: メインレイヤー — 不透明で描画
+        // Pass 0: メインレイヤー — アルファブレンド対応
         // ============================================================
         Pass
         {
             Name "MAIN"
-            ZWrite On
+            ZWrite Off
+            Blend SrcAlpha OneMinusSrcAlpha
 
             CGPROGRAM
             #pragma vertex   vert
@@ -208,7 +219,7 @@ Shader "Unlit/M5Visual"
                 float animHash = frac(triHash
                     + floor(_Time.y * 8.0) * 0.317 * _GlitchIntensity);
 
-                emitTriangle(input, stream, float2(0.0, 0.0), 1.0, 1.0, animHash, 0.0);
+                emitTriangle(input, stream, float2(0.0, 0.0), 1.0, 1.0, animHash, 0.0, 1.0);
             }
             ENDCG
         }
@@ -246,12 +257,21 @@ Shader "Unlit/M5Visual"
 
                 float g = _GhostOffset;
 
-                //                          xyShift                      extrude layer  hash      bandPhase
-                emitTriangle(input, stream, float2(-g,      g*0.6 ), 0.55, 2.0, animHash, 1.73); // 左上  R
-                emitTriangle(input, stream, float2( g,     -g*0.4 ), 0.55, 3.0, animHash, 3.46); // 右下  B
-                emitTriangle(input, stream, float2(-g*0.5, -g     ), 0.45, 4.0, animHash, 5.19); // 左下  C(cyan)
-                emitTriangle(input, stream, float2( g*0.8,  g     ), 0.45, 5.0, animHash, 6.92); // 右上  M(magenta)
-                emitTriangle(input, stream, float2( g*1.7,  g*0.15), 0.30, 6.0, animHash, 8.65); // 右遠  dim
+                // 時間ステップでランダム方向に切替（2Hz）
+                float gStep = floor(_Time.y * 2.0 + triHash * 3.0);
+                float gs = _GhostOffset * 0.5; // 飛び幅を拡大（0.1→0.5）
+
+                float2 d1 = float2(frac(sin(gStep*127.1        )*43758.5453)*2.0-1.0, frac(sin(gStep*311.7        )*43758.5453)*2.0-1.0) * gs;
+                float2 d2 = float2(frac(sin(gStep* 74.3+17.3   )*43758.5453)*2.0-1.0, frac(sin(gStep*191.9+17.3   )*43758.5453)*2.0-1.0) * gs;
+                float2 d3 = float2(frac(sin(gStep*233.1+ 5.19  )*43758.5453)*2.0-1.0, frac(sin(gStep* 57.3+ 5.19  )*43758.5453)*2.0-1.0) * gs;
+                float2 d4 = float2(frac(sin(gStep*419.7+ 8.65  )*43758.5453)*2.0-1.0, frac(sin(gStep*163.1+ 8.65  )*43758.5453)*2.0-1.0) * gs;
+                float2 d5 = float2(frac(sin(gStep*512.3+11.11  )*43758.5453)*2.0-1.0, frac(sin(gStep* 93.7+11.11  )*43758.5453)*2.0-1.0) * gs;
+
+                emitTriangle(input, stream, d1, 0.0, 2.0, animHash, 1.73, 0.0); // R
+                emitTriangle(input, stream, d2, 0.0, 3.0, animHash, 3.46, 0.0); // B
+                emitTriangle(input, stream, d3, 0.0, 4.0, animHash, 5.19, 0.0); // Cyan
+                emitTriangle(input, stream, d4, 0.0, 5.0, animHash, 6.92, 0.0); // Magenta
+                emitTriangle(input, stream, d5, 0.0, 6.0, animHash, 8.65, 0.0); // dim
             }
             ENDCG
         }

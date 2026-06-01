@@ -17,11 +17,14 @@ public class PostEffect : MonoBehaviour
 
     [System.NonSerialized] public float aberrationBoost = 0f;
     [System.NonSerialized] public float grainBoost      = 0f;
+    // Ghost glow: M5VisualController から設定（0=なし、大きいほど強いグロー）
+    [System.NonSerialized] public float ghostOffset     = 0f;
 
     private Material runtimeMaterial;
-    private static readonly int ScanlineCountID    = Shader.PropertyToID("_ScanlineCount");
+    private static readonly int ScanlineCountID      = Shader.PropertyToID("_ScanlineCount");
     private static readonly int AberrationStrengthID = Shader.PropertyToID("_AberrationStrength");
-    private static readonly int GrainStrengthID    = Shader.PropertyToID("_GrainStrength");
+    private static readonly int GrainStrengthID      = Shader.PropertyToID("_GrainStrength");
+    private static readonly int GhostOffsetID        = Shader.PropertyToID("_GhostOffset");
 
     void OnEnable()
     {
@@ -51,9 +54,10 @@ public class PostEffect : MonoBehaviour
         }
 
         // 毎フレーム外部設定値をマテリアルへ反映（グリッチブースト込み）
-        runtimeMaterial.SetFloat(ScanlineCountID,     scanlineCount);
+        runtimeMaterial.SetFloat(ScanlineCountID,      scanlineCount);
         runtimeMaterial.SetFloat(AberrationStrengthID, baseAberration + aberrationBoost);
-        runtimeMaterial.SetFloat(GrainStrengthID,     baseGrain      + grainBoost);
+        runtimeMaterial.SetFloat(GrainStrengthID,      baseGrain      + grainBoost);
+        runtimeMaterial.SetFloat(GhostOffsetID,        ghostOffset);
 
         Graphics.Blit(source, destination, runtimeMaterial);
     }

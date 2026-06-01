@@ -17,6 +17,8 @@ Shader "Hidden/PostEffect"
 
         //_GrainStrength ("Grain Strength", Range(0, 0.5)) = 0.08 初期値
         _GrainStrength ("Grain Strength", Range(0, 0.5)) = 0.1
+        // Ghost glow (set from PostEffect.cs at runtime)
+        _GhostOffset ("Ghost Offset", Range(0, 0.2)) = 0
     }
     SubShader
     {
@@ -55,8 +57,8 @@ Shader "Hidden/PostEffect"
             float _ScanlineIntensity;
 
             float _AberrationStrength;
-
             float _GrainStrength;
+            float _GhostOffset;
 
             v2f vert (appdata v)
             {
@@ -95,6 +97,38 @@ Shader "Hidden/PostEffect"
                 // ----- Film Grain -----
                 float grain = hash(i.uv + _Time.y) - 0.5;  // -0.5 .. +0.5
                 col.rgb += grain * _GrainStrength;
+
+                // ----- Ghost Glow: 四方八方ランダム (R / B / Cyan / Magenta) -----
+                if (_GhostOffset > 0.001)
+                {
+                    float g = _GhostOffset * 0.18; // 大きめオフセット（読めなくてOK）
+                    float tStep = floor(_Time.y * 3.0); // 3Hz でランダム方向切替
+
+                    float a1 = frac(sin(tStep * 127.1          ) * 43758.5453) * 6.2832;
+                    float a2 = frac(sin(tStep * 311.7 + 17.3   ) * 43758.5453) * 6.2832;
+                    float a3 = frac(sin(tStep *  74.3 +  5.19  ) * 43758.5453) * 6.2832;
+                    float a4 = frac(sin(tStep * 191.9 +  8.65  ) * 43758.5453) * 6.2832;
+
+                    // R
+                    fixed3 s1 = tex2D(_MainTex, i.uv + float2(cos(a1), sin(a1)) * g).rgb;
+                    col.r += dot(s1, float3(0.299,0.587,0.114)) * s1.r * _GhostOffset * 4.0;
+
+                    // B
+                    fixed3 s2 = tex2D(_MainTex, i.uv + float2(cos(a2), sin(a2)) * g).rgb;
+                    col.b += dot(s2, float3(0.299,0.587,0.114)) * s2.b * _GhostOffset * 4.0;
+
+                    // Cyan (G+B)
+                    fixed3 s3 = tex2D(_MainTex, i.uv + float2(cos(a3), sin(a3)) * g).rgb;
+                    float  l3 = dot(s3, float3(0.299,0.587,0.114));
+                    col.g += l3 * s3.g * _GhostOffset * 2.5;
+                    col.b += l3 * s3.b * _GhostOffset * 2.5;
+
+                    // Magenta (R+B)
+                    fixed3 s4 = tex2D(_MainTex, i.uv + float2(cos(a4), sin(a4)) * g).rgb;
+                    float  l4 = dot(s4, float3(0.299,0.587,0.114));
+                    col.r += l4 * s4.r * _GhostOffset * 3.0;
+                    col.b += l4 * s4.b * _GhostOffset * 3.0;
+                }
 
                 // ----- Vignette -----
                 float dist = length(centeredUV);

@@ -149,18 +149,18 @@ static void loadWav(const char* path, uint8_t** buf, size_t* sz) {
 }
 
 // WAV 再生 (ch0 / 重要イベント用)
-static void sndWav(uint8_t* buf, size_t sz, uint8_t vol = 200, bool stop = true) {
+static void sndWav(uint8_t* buf, size_t sz, uint8_t vol = 240, bool stop = true) {
   if (buf && sz) M5.Speaker.playWav(buf, sz, vol, 0, stop);
 }
 
 // トーン再生 (ch1 / UI フィードバック用)
-static void sndTone(uint32_t freq, uint32_t ms, uint8_t vol = 140) {
+static void sndTone(uint32_t freq, uint32_t ms, uint8_t vol = 180) {
   M5.Speaker.setAllChannelVolume(vol);
   M5.Speaker.tone(freq, ms, 1, true);
 }
 
 // Shake / Hold 用トーン (ch2)
-static void sndTone2(uint32_t freq, uint32_t ms, uint8_t vol = 100) {
+static void sndTone2(uint32_t freq, uint32_t ms, uint8_t vol = 140) {
   M5.Speaker.tone(freq, ms, 2, true);
 }
 
@@ -169,7 +169,7 @@ static void sndTone2(uint32_t freq, uint32_t ms, uint8_t vol = 100) {
 static void sndStepClear(int step) {
   // WAV があれば優先
   if (wavHackStep && wavHackStepSz) {
-    sndWav(wavHackStep, wavHackStepSz, 160, false);
+    sndWav(wavHackStep, wavHackStepSz, 200, false);
     return;
   }
   // フォールバック: 2音アルペジオ
@@ -221,7 +221,7 @@ static void updateHoldSound(bool holding, float holdRatio, uint32_t now) {
 // Sound システム初期化 (setup() から呼ぶ)
 void soundSetup() {
   M5.Speaker.begin();
-  M5.Speaker.setVolume(180);
+  M5.Speaker.setVolume(220);
 
   // SD 初期化 (Core2 の CS = GPIO 4)
   if (!SD.begin(4, SPI, 25000000)) {
@@ -281,8 +281,8 @@ void readSerialCmd() {
 // HACK UI
 // ============================================================
 
-void drawHackInitUI(uint32_t elapsed) {
-  if (elapsed < 50) {
+void drawHackInitUI(uint32_t elapsed, bool dirty) {
+  if (dirty) {
     M5.Display.fillScreen(COLOR_BG);
     drawText(10, 8, "SECURITY BYPASS", COLOR_KEY, 2);
     drawHLine(30, COLOR_DIM);
@@ -374,7 +374,7 @@ void startHack() {
 
   // ── INIT 開始音: WAV があれば再生、なければドラマチックなトーン列 ──
   if (wavHackStart && wavHackStartSz) {
-    sndWav(wavHackStart, wavHackStartSz, 220, true);
+    sndWav(wavHackStart, wavHackStartSz, 255, true);
   } else {
     // フォールバック: 下降アルペジオ (hack 感)
     M5.Speaker.tone(880, 80, 1, true);
@@ -395,7 +395,8 @@ void updateHack(float roll) {
   switch (hack.phase) {
 
   case HP_INIT:
-    drawHackInitUI(elapsed);
+    drawHackInitUI(elapsed, hack.drawDirty);
+    hack.drawDirty = false;
     hack.progress = (int)(constrain((float)elapsed / INIT_DURATION_MS, 0.f, 1.f) * 10);
     if (elapsed >= INIT_DURATION_MS) {
       hack.progress  = 0;
@@ -538,7 +539,7 @@ void updateHack(float roll) {
       hack.drawDirty = false;
       // 成功音: WAV 優先
       if (wavSuccess && wavSuccessSz) {
-        sndWav(wavSuccess, wavSuccessSz, 230, true);
+        sndWav(wavSuccess, wavSuccessSz, 255, true);
       } else {
         // フォールバック: 上昇ファンファーレ
         M5.Speaker.tone(523, 100, 1, true); delay(110);
@@ -556,7 +557,7 @@ void updateHack(float roll) {
       hack.drawDirty = false;
       // 失敗音: WAV 優先
       if (wavFail && wavFailSz) {
-        sndWav(wavFail, wavFailSz, 220, true);
+        sndWav(wavFail, wavFailSz, 255, true);
       } else {
         // フォールバック: 下降ブザー
         M5.Speaker.tone(300, 150, 1, true); delay(160);
@@ -718,17 +719,21 @@ void loop() {
   int btnC=M5.BtnC.isPressed()?1:0;
 
   // ── ボタン音 (立ち上がりエッジのみ) ─────────────────────────
-  if (M5.BtnA.wasPressed()) sndTone(330, 65);   // A: 低め
-  if (M5.BtnB.wasPressed()) sndTone(500, 65);   // B: 中
-  if (M5.BtnC.wasPressed()) sndTone(330, 65);   // C: 低め
+  bool pressedA = M5.BtnA.wasPressed();
+  bool pressedB = M5.BtnB.wasPressed();
+  bool pressedC = M5.BtnC.wasPressed();
+  bool anyBtn = pressedA || pressedB || pressedC;
+  if (pressedA) sndTone(330, 65);
+  if (pressedB) sndTone(500, 65);
+  if (pressedC) sndTone(330, 65);
 
-  // ── タッチ音 (メイン画面 / hack 外) ──────────────────────────
-  if (hack.phase == HP_IDLE && t.wasPressed()) {
-    sndTone(1200, 22, 80); // 柔らかい高音ティック
+  // ── タッチ音 (メイン画面 / hack 外 / ボタンエリア除外) ─────────
+  if (hack.phase == HP_IDLE && t.wasPressed() && t.y < 240) {
+    sndTone(1200, 22, 120); // 柔らかい高音ティック
   }
 
-  // ── Shake 音 ─────────────────────────────────────────────────
-  updateShakeSound(ax, ay, az, now);
+  // ── Shake 音: 無効化 ─────────────────────────────────────────
+  // updateShakeSound(ax, ay, az, now);
 
   if (hack.phase != HP_IDLE) updateHack(pitch);
 

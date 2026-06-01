@@ -1,0 +1,49 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 8
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Plane1_LogDisplay
+  m_Shader: {fileID: 4800000, guid: dca417060272e9144bb46befda871b01, type: 3}
+  m_Parent: {fileID: 0}
+  m_ModifiedSerializedProperties: 0
+  m_ValidKeywords: []
+  m_InvalidKeywords: []
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {}
+  disabledShaderPasses: []
+  m_LockedProperties: 
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs:
+    - _MainTex:
+        m_Texture: {fileID: 2800000, guid: 1a71037dbeaa34d49b963c91a7755b2e, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    m_Ints: []
+    m_Floats:
+    - _ExtrudeAmount: 0.3
+    - _GhostOffset: 0
+    - _GlitchIntensity: 0
+    - _HackButtonPulse: 0
+    - _PointSize: 0.18
+    - _RenderMode: 0
+    - _ShowHackButton: 0
+    - _TexBlend: 1
+    - _TouchActive: 0
+    - _TouchFalloff: 80
+    - _TouchGlow: 1.5
+    - _WireWidth: 0.03
+    m_Colors:
+    - _BaseColor: {r: 0.053999975, g: 0.14899996, b: 0.14899996, a: 1}
+    - _LineColor: {r: 0.54499996, g: 0.592, b: 0.31399998, a: 1}
+    - _TouchPoint: {r: 0.5, g: 0.5, b: 0, a: 0}
+  m_BuildTextureStacks: []
+  m_AllowLocking: 1

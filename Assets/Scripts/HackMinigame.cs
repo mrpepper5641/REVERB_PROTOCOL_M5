@@ -61,6 +61,8 @@ public class HackMinigame : MonoBehaviour
     // ─────────────────────────────────────────────────────────
     void Start()
     {
+        if (M5Reader.Instance != null) m5Reader = M5Reader.Instance;
+
         for (int i = 0; i < HEX_LINES; i++)
             hexLines[i] = MakeHexLine();
     }
@@ -317,18 +319,17 @@ public class HackMinigame : MonoBehaviour
             }
         }
 
-        // ── パーセント数値（右端） ────────────────────────
-        float pct = visualProgress;
-        string pctStr = $"{(int)pct:D2}.{(int)(Mathf.Repeat(pct, 1f) * 10):D1}%";
-        DrawLabel(x + innerW + 6f, y + 4f, 60f, pctStr,
-                  headerCol, 13, true, TextAnchor.UpperLeft);
 
         y += barH + 8f;
 
-        // ── ボトムステータス行 ────────────────────────────
+        // ── ボトムステータス行 ＋ パーセント（右揃え、パネル内） ──
+        float pct = visualProgress;
+        string pctStr = $"{(int)pct:D2}.{(int)(Mathf.Repeat(pct, 1f) * 10):D1}%";
         string bottom = GetBottomLine(hs);
-        DrawLabel(x, y, innerW, bottom,
+        DrawLabel(x, y, innerW - 70f, bottom,
                   new Color(0.35f, 0.52f, 0.25f, 0.75f), 11, false, TextAnchor.UpperLeft);
+        DrawLabel(x, y, innerW, pctStr,
+                  headerCol, 13, true, TextAnchor.UpperRight);
     }
 
     // ─────────────────────────────────────────────────────────
