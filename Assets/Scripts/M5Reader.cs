@@ -40,6 +40,7 @@ public class M5Reader : MonoBehaviour
     [SerializeField] private int hackProgress; // 0-100
 
     public bool IsConnected  => isConnected;
+    public bool IsBootDone   { get; private set; } = false;
     public float Pitch       => pitch;
     public float Roll        => roll;
     public Vector3 Accel     => new Vector3(ax, ay, az);
@@ -89,6 +90,7 @@ public class M5Reader : MonoBehaviour
                 connectedPort = portName;
                 Debug.Log($"[M5Reader] Connected on {portName}");
                 StartReadThread();
+                try { serialPort.WriteLine("CMD,CONNECTED"); } catch { }
                 return;
             }
         }
@@ -162,6 +164,8 @@ public class M5Reader : MonoBehaviour
 
     private void ParseLine(string line)
     {
+        if (line == "BOOT_DONE") { IsBootDone = true; return; }
+
         // expected: D,P,R,AX,AY,AZ,TX,TY,A,B,C
         if (!line.StartsWith("D,")) return;
 

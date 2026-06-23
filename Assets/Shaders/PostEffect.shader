@@ -19,6 +19,12 @@ Shader "Hidden/PostEffect"
         _GrainStrength ("Grain Strength", Range(0, 0.5)) = 0.1
         // Ghost glow (set from PostEffect.cs at runtime)
         _GhostOffset ("Ghost Offset", Range(0, 0.2)) = 0
+
+        // Screen-space glitch (set from PostEffect.cs at runtime)
+        _GlitchIntensity ("Glitch Intensity", Range(0, 1)) = 0
+        _GlitchSeed ("Glitch Seed", Float) = 0
+        _WobbleIntensity ("Wobble Intensity", Range(0, 1)) = 0
+        _MonoIntensity ("Mono Intensity", Range(0, 1)) = 0
     }
     SubShader
     {
@@ -59,6 +65,10 @@ Shader "Hidden/PostEffect"
             float _AberrationStrength;
             float _GrainStrength;
             float _GhostOffset;
+            float _GlitchIntensity;
+            float _GlitchSeed;
+            float _WobbleIntensity;
+            float _MonoIntensity;
 
             v2f vert (appdata v)
             {
@@ -78,15 +88,67 @@ Shader "Hidden/PostEffect"
             {
                 float2 centeredUV = i.uv - 0.5;
 
+                // ----- Screen-space Glitch -----
+                float2 sampleUV = i.uv;
+                if (_GlitchIntensity > 0.001)
+                {
+                    // 太いブロックずれ (画面高さの4%単位)
+                    float blockH = 0.04;
+                    float blockY = floor(i.uv.y / blockH) * blockH;
+                    float r1 = hash(float2(blockY, _GlitchSeed));
+                    float r2 = hash(float2(blockY, _GlitchSeed + 13.7));
+                    if (r1 > (1.0 - _GlitchIntensity * 0.45))
+                        sampleUV.x = frac(sampleUV.x + (r2 - 0.5) * 0.18 * _GlitchIntensity);
+
+                    // 細いラインティア (0.5%単位)
+                    float thinH = 0.005;
+                    float thinY = floor(i.uv.y / thinH) * thinH;
+                    float r3 = hash(float2(thinY, _GlitchSeed + 99.1));
+                    if (r3 > (1.0 - _GlitchIntensity * 0.12))
+                        sampleUV.x = frac(sampleUV.x + (hash(float2(thinY, _GlitchSeed + 5.5)) - 0.5) * 0.35);
+
+                    // RGBチャンネル個別ずれ (ブロック単位)
+                    float r4 = hash(float2(blockY, _GlitchSeed + 31.4));
+                    if (r4 > (1.0 - _GlitchIntensity * 0.3))
+                    {
+                        float rShift = (hash(float2(blockY, _GlitchSeed + 77.7)) - 0.5) * 0.06 * _GlitchIntensity;
+                        float bShift = (hash(float2(blockY, _GlitchSeed + 44.2)) - 0.5) * 0.06 * _GlitchIntensity;
+                        fixed4 col2;
+                        col2.r = tex2D(_MainTex, sampleUV + float2(rShift, 0)).r;
+                        col2.g = tex2D(_MainTex, sampleUV).g;
+                        col2.b = tex2D(_MainTex, sampleUV + float2(bShift, 0)).b;
+                        col2.a = 1.0;
+
+                        float scanFactor2 = lerp(1.0 - _ScanlineIntensity, 1.0,
+                            sin(i.uv.y * _ScanlineCount * 3.14159) * 0.5 + 0.5);
+                        col2.rgb *= scanFactor2;
+                        float grain2 = hash(i.uv + _Time.y + 0.3) - 0.5;
+                        col2.rgb += grain2 * _GrainStrength;
+                        float dist2 = length(centeredUV);
+                        float mask2 = smoothstep(_VignetteSmoothness, 0.0, dist2 * _VignetteIntensity);
+                        col2.rgb = lerp(_VignetteColor.rgb, col2.rgb, mask2);
+                        return col2;
+                    }
+                }
+
+                // ----- CRT Raster Wobble -----
+                if (_WobbleIntensity > 0.001)
+                {
+                    float w1 = sin(i.uv.y * 14.0 * 3.14159 + _Time.y * 4.2);
+                    float w2 = sin(i.uv.y * 29.0 * 3.14159 - _Time.y * 2.5);
+                    float wobble = (w1 * 0.6 + w2 * 0.4) * _WobbleIntensity * 0.014;
+                    sampleUV.x = frac(sampleUV.x + wobble);
+                }
+
                 // ----- Chromatic Aberration -----
                 float2 dir = centeredUV;
                 float2 rOffset = dir * _AberrationStrength;
                 float2 bOffset = dir * -_AberrationStrength;
 
                 fixed4 col;
-                col.r = tex2D(_MainTex, i.uv + rOffset).r;
-                col.g = tex2D(_MainTex, i.uv).g;
-                col.b = tex2D(_MainTex, i.uv + bOffset).b;
+                col.r = tex2D(_MainTex, sampleUV + rOffset).r;
+                col.g = tex2D(_MainTex, sampleUV).g;
+                col.b = tex2D(_MainTex, sampleUV + bOffset).b;
                 col.a = 1.0;
 
                 // ----- Scanlines -----
@@ -134,6 +196,14 @@ Shader "Hidden/PostEffect"
                 float dist = length(centeredUV);
                 float mask = smoothstep(_VignetteSmoothness, 0.0, dist * _VignetteIntensity);
                 col.rgb = lerp(_VignetteColor.rgb, col.rgb, mask);
+
+                // ----- Monochrome (phosphor green) -----
+                if (_MonoIntensity > 0.001)
+                {
+                    float lum = dot(col.rgb, float3(0.299, 0.587, 0.114));
+                    fixed3 mono = fixed3(lum * 0.3, lum, lum * 0.1);
+                    col.rgb = lerp(col.rgb, mono, _MonoIntensity);
+                }
 
                 return col;
             }

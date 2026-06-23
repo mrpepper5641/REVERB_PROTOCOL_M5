@@ -106,19 +106,20 @@ struct HackState {
 // ============================================================
 
 // ── WAV バッファ (PSRAM に読み込む) ─────────────────────────
+static uint8_t* wavBoot        = nullptr;  static size_t wavBootSz        = 0;
+static uint8_t* wavConnect     = nullptr;  static size_t wavConnectSz     = 0;
 static uint8_t* wavHackStart   = nullptr;  static size_t wavHackStartSz   = 0;
 static uint8_t* wavHackStep    = nullptr;  static size_t wavHackStepSz    = 0;
 static uint8_t* wavSuccess     = nullptr;  static size_t wavSuccessSz     = 0;
 static uint8_t* wavFail        = nullptr;  static size_t wavFailSz        = 0;
 
-// ── Shake 検出 ───────────────────────────────────────────────
-static bool     shakeActive     = false;
-static uint32_t nextShakeToneMs = 0;
-static constexpr float SHAKE_THRESHOLD = 0.5f;   // 1G からの偏差
-static constexpr float SHAKE_RELEASE   = 0.2f;
-
 // ── Hold フィードバック音 ────────────────────────────────────
 static uint32_t lastHoldBeepMs = 0;
+
+// ── タッチ点滅 ───────────────────────────────────────────────
+static uint32_t blinkTimer = 0;
+static bool     blinkState = false;
+static constexpr uint32_t BLINK_INTERVAL_MS = 280;
 
 // ── チャンネル割り当て ───────────────────────────────────────
 //   ch 0 : WAV 再生 (hack_start / success / fail)
@@ -180,31 +181,6 @@ static void sndStepClear(int step) {
   // (step clear は低頻度なので十分)
 }
 
-// ── Shake 検出 + 音更新 ───────────────────────────────────────
-static void updateShakeSound(float ax, float ay, float az, uint32_t now) {
-  if (hack.phase != HP_IDLE) {
-    // hack 中は shake 音を出さない
-    shakeActive = false;
-    return;
-  }
-  float mag = sqrtf(ax * ax + ay * ay + az * az);
-  float dev = fabsf(mag - 1.0f);
-
-  if (!shakeActive && dev > SHAKE_THRESHOLD) {
-    shakeActive    = true;
-    nextShakeToneMs = now;
-  } else if (shakeActive && dev < SHAKE_RELEASE) {
-    shakeActive = false;
-    M5.Speaker.stop(2);
-  }
-
-  if (shakeActive && now >= nextShakeToneMs) {
-    // ランダムな周波数のバーストでグリッチノイズを表現
-    uint32_t f = 80 + random(1600);
-    sndTone2(f, 45);
-    nextShakeToneMs = now + 48;
-  }
-}
 
 // ── Tilt ホールド中フィードバック ────────────────────────────
 //   holdRatio 0→1 に連動して周波数が上昇する
@@ -228,6 +204,8 @@ void soundSetup() {
     Serial.println("[SND] SD init failed — WAV disabled, tones only");
     return;
   }
+  loadWav("/sounds/boot.wav",         &wavBoot,      &wavBootSz);
+  loadWav("/sounds/connect.wav",      &wavConnect,   &wavConnectSz);
   loadWav("/sounds/hack_start.wav",   &wavHackStart, &wavHackStartSz);
   loadWav("/sounds/hack_step.wav",    &wavHackStep,  &wavHackStepSz);
   loadWav("/sounds/hack_success.wav", &wavSuccess,   &wavSuccessSz);
@@ -267,7 +245,8 @@ void readSerialCmd() {
     if (c == '\n' || c == '\r') {
       if (cmdLen > 0) {
         cmdBuf[cmdLen] = '\0';
-        if (strcmp(cmdBuf, "CMD,HACK_START") == 0) startHack();
+        if      (strcmp(cmdBuf, "CMD,HACK_START") == 0) startHack();
+        else if (strcmp(cmdBuf, "CMD,CONNECTED") == 0)  onUnityConnected();
         cmdLen = 0;
       }
     } else {
@@ -304,27 +283,42 @@ void drawHackInitUI(uint32_t elapsed, bool dirty) {
   }
 }
 
-void drawHackTouchSideUI(int stepNum, bool isStep2) {
+void drawHackTouchSideUI(int stepNum, bool isStep2, bool blink) {
   M5.Display.fillScreen(COLOR_BG);
   char buf[32];
   snprintf(buf, sizeof(buf), "STEP %d/6 - TOUCH", stepNum);
   drawText(10, 8, buf, COLOR_KEY, 2);
   drawHLine(30, COLOR_DIM);
   M5.Display.drawFastVLine(160, 40, 155, COLOR_KEY);
-  bool showLeft  = !isStep2 || (isStep2 && !hack.firstSideLeft);
-  bool showRight = !isStep2 || (isStep2 &&  hack.firstSideLeft);
-  drawText(25,  105, "<<<", showLeft  ? COLOR_CYAN : COLOR_DIM, 3);
-  drawText(180, 105, ">>>", showRight ? COLOR_CYAN : COLOR_DIM, 3);
+
+  bool needLeft  = !isStep2 || (isStep2 && !hack.firstSideLeft);
+  bool needRight = !isStep2 || (isStep2 &&  hack.firstSideLeft);
+
+  // 押すべき側: blink でオン(CYAN)/オフ(背景色=不可視)
+  uint16_t colLeft  = needLeft  ? (blink ? COLOR_CYAN : COLOR_BG) : COLOR_DIM;
+  uint16_t colRight = needRight ? (blink ? COLOR_CYAN : COLOR_BG) : COLOR_DIM;
+
+  drawText(25,  105, "<<<", colLeft,  3);
+  drawText(180, 105, ">>>", colRight, 3);
+
+  drawText(30,  70, needLeft  ? "PRESS" : "",  needLeft  ? COLOR_KEY : COLOR_BG, 1);
+  drawText(185, 70, needRight ? "PRESS" : "", needRight ? COLOR_KEY : COLOR_BG, 1);
+
   drawText(10, 200, "TIME", COLOR_DIM, 1);
   drawBar(50, 198, 250, 14, 1.0f, COLOR_CYAN);
 }
 
-void drawHackTouchCenterUI() {
+void drawHackTouchCenterUI(bool blink) {
   M5.Display.fillScreen(COLOR_BG);
   drawText(10, 8, "STEP 3/6 - TOUCH", COLOR_KEY, 2);
   drawHLine(30, COLOR_DIM);
-  M5.Display.drawRect(88, 50, 144, 140, COLOR_CYAN);
-  drawText(100, 110, "CENTER", COLOR_CYAN, 2);
+
+  uint16_t boxCol = blink ? COLOR_CYAN : COLOR_BG;
+  M5.Display.fillRect(88, 50, 144, 140, COLOR_BG);
+  M5.Display.drawRect(88, 50, 144, 140, boxCol);
+  drawText(100, 100, "PRESS", boxCol, 2);
+  drawText(100, 120, "HERE",  boxCol, 2);
+
   drawText(10, 200, "TIME", COLOR_DIM, 1);
   drawBar(50, 198, 250, 14, 1.0f, COLOR_CYAN);
 }
@@ -365,6 +359,17 @@ void drawHackResult(bool success) {
 // ============================================================
 // HACK STATE MACHINE
 // ============================================================
+void onUnityConnected() {
+  // Unity接続音: WAV優先 → なければ上昇トーン
+  if (wavConnect && wavConnectSz) {
+    sndWav(wavConnect, wavConnectSz, 220, true);
+  } else {
+    sndTone(330, 60); delay(70);
+    sndTone(550, 60); delay(70);
+    sndTone(880, 150);
+  }
+}
+
 void startHack() {
   if (hack.phase != HP_IDLE) return;
   hack.phase     = HP_INIT;
@@ -409,24 +414,36 @@ void updateHack(float roll) {
     break;
 
   case HP_TOUCH1:
-    if (hack.drawDirty) { drawHackTouchSideUI(1, false); hack.drawDirty = false; }
+    // 点滅更新
+    if (now - blinkTimer >= BLINK_INTERVAL_MS) {
+      blinkTimer = now; blinkState = !blinkState;
+      drawHackTouchSideUI(1, false, blinkState);
+    } else if (hack.drawDirty) {
+      drawHackTouchSideUI(1, false, blinkState); hack.drawDirty = false;
+    }
     drawBar(50, 198, 250, 14,
       1.0f - constrain((float)elapsed / TOUCH1_TIMEOUT_MS, 0.f, 1.f), COLOR_CYAN);
     if (elapsed > TOUCH1_TIMEOUT_MS) {
       hack.phase = HP_FAIL; hack.drawDirty = true;
-      sndTone(150, 400); // 低い失敗音
+      sndTone(150, 400);
       break;
     }
     if (touch.wasPressed()) {
       hack.firstSideLeft = (tx_raw < 0.5f);
       hack.progress = 17;
       hack.phase = HP_TOUCH2; hack.stepStart = now; hack.drawDirty = true;
+      blinkTimer = 0;
       sndStepClear(1);
     }
     break;
 
   case HP_TOUCH2:
-    if (hack.drawDirty) { drawHackTouchSideUI(2, true); hack.drawDirty = false; }
+    if (now - blinkTimer >= BLINK_INTERVAL_MS) {
+      blinkTimer = now; blinkState = !blinkState;
+      drawHackTouchSideUI(2, true, blinkState);
+    } else if (hack.drawDirty) {
+      drawHackTouchSideUI(2, true, blinkState); hack.drawDirty = false;
+    }
     drawBar(50, 198, 250, 14,
       1.0f - constrain((float)elapsed / TOUCH2_TIMEOUT_MS, 0.f, 1.f), COLOR_CYAN);
     if (elapsed > TOUCH2_TIMEOUT_MS) {
@@ -439,6 +456,7 @@ void updateHack(float roll) {
       if (isLeft != hack.firstSideLeft) {
         hack.progress = 33;
         hack.phase = HP_TOUCH3; hack.stepStart = now; hack.drawDirty = true;
+        blinkTimer = 0;
         sndStepClear(2);
       } else {
         hack.phase = HP_FAIL; hack.drawDirty = true;
@@ -448,7 +466,12 @@ void updateHack(float roll) {
     break;
 
   case HP_TOUCH3:
-    if (hack.drawDirty) { drawHackTouchCenterUI(); hack.drawDirty = false; }
+    if (now - blinkTimer >= BLINK_INTERVAL_MS) {
+      blinkTimer = now; blinkState = !blinkState;
+      drawHackTouchCenterUI(blinkState);
+    } else if (hack.drawDirty) {
+      drawHackTouchCenterUI(blinkState); hack.drawDirty = false;
+    }
     drawBar(50, 198, 250, 14,
       1.0f - constrain((float)elapsed / TOUCH3_TIMEOUT_MS, 0.f, 1.f), COLOR_CYAN);
     if (elapsed > TOUCH3_TIMEOUT_MS) {
@@ -464,6 +487,7 @@ void updateHack(float roll) {
         hack.holding   = false; hack.holdStart = 0;
         hack.tiltLeft  = (random(0, 2) == 0);
         hack.drawDirty = true;
+        blinkTimer = 0;
         sndStepClear(3);
       } else {
         hack.phase = HP_FAIL; hack.drawDirty = true;
@@ -616,23 +640,36 @@ void renderMismatchWarning(unsigned long now) {
   else if (!mismatchActive) drawText(240, 8, "v1.2", COLOR_DIM, 1);
 }
 void renderBoot(unsigned long elapsed) {
+  // 音: 500ms開始、4秒 → 4500msで終了
+  // 各ステップを500ms〜4500msに均等分散 (約700msごと)
   int s=0;
-  if      (elapsed>=500  && elapsed<1000) s=1;
-  else if (elapsed>=1000 && elapsed<1500) s=2;
-  else if (elapsed>=1500 && elapsed<2500) s=3;
-  else if (elapsed>=2500 && elapsed<3000) s=4;
-  else if (elapsed>=3000 && elapsed<4000) s=5;
-  else if (elapsed>=4000 && elapsed<4500) s=6;
-  else if (elapsed>=4500)                 s=99;
+  if      (elapsed>=500  && elapsed<1200) s=1;
+  else if (elapsed>=1200 && elapsed<1900) s=2;
+  else if (elapsed>=1900 && elapsed<2600) s=3;
+  else if (elapsed>=2600 && elapsed<3300) s=4;
+  else if (elapsed>=3300 && elapsed<4000) s=5;
+  else if (elapsed>=4000 && elapsed<4600) s=6;
+  else if (elapsed>=4600)                 s=99;
   if (s==bootStep) return; bootStep=s;
   switch(bootStep){
-    case 1: drawText(20,30,"M5 TERMINAL",COLOR_KEY,3); break;
+    case 1:
+      drawText(20,30,"M5 TERMINAL",COLOR_KEY,3);
+      // 起動音: WAV優先 → なければトーン列
+      if (wavBoot && wavBootSz) {
+        sndWav(wavBoot, wavBootSz, 220, true);
+      } else {
+        sndTone(220, 80); delay(90);
+        sndTone(330, 80); delay(90);
+        sndTone(440, 80); delay(90);
+        sndTone(660, 200);
+      }
+      break;
     case 2: drawText(20,75,"v1.2 / BOOT",COLOR_DIM,2); break;
     case 3: drawText(20,110,"> MEM CHECK...",COLOR_KEY,2); break;
     case 4: clearRegion(20,110,280,20); drawText(20,110,"> MEM OK",COLOR_KEY,2); break;
     case 5: drawText(20,140,"! OBSERVER MISMATCH",COLOR_WARN,2); break;
     case 6: drawText(20,170,"> PROCEEDING...",COLOR_DIM,2); break;
-    case 99: uiState=STATE_MAIN; stateStartMillis=millis(); drawMainStaticUI(); break;
+    case 99: M5.Speaker.stop(0); uiState=STATE_MAIN; stateStartMillis=millis(); drawMainStaticUI(); Serial.println("BOOT_DONE"); break;
   }
 }
 
@@ -722,18 +759,10 @@ void loop() {
   bool pressedA = M5.BtnA.wasPressed();
   bool pressedB = M5.BtnB.wasPressed();
   bool pressedC = M5.BtnC.wasPressed();
-  bool anyBtn = pressedA || pressedB || pressedC;
   if (pressedA) sndTone(330, 65);
   if (pressedB) sndTone(500, 65);
   if (pressedC) sndTone(330, 65);
 
-  // ── タッチ音 (メイン画面 / hack 外 / ボタンエリア除外) ─────────
-  if (hack.phase == HP_IDLE && t.wasPressed() && t.y < 240) {
-    sndTone(1200, 22, 120); // 柔らかい高音ティック
-  }
-
-  // ── Shake 音: 無効化 ─────────────────────────────────────────
-  // updateShakeSound(ax, ay, az, now);
 
   if (hack.phase != HP_IDLE) updateHack(pitch);
 
